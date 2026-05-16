@@ -8,9 +8,21 @@ from datetime import datetime as dt
 from functools import cached_property
 from collections.abc import Callable
 from numpy import ndarray
+import ctypes
 
+ll = ctypes.CDLL('arimagarch/log_likelihood.so')
 
-LOG_2PI = np.log(np.pi * 2)
+ll.log_likelihood.argtypes = [
+    ctypes.POINTER(ctypes.c_double), # data[]
+    ctypes.c_int, # data_len
+    ctypes.c_int, # pad
+    ctypes.POINTER(ctypes.c_double), # params[]
+    ctypes.POINTER(ctypes.c_int), # order[]
+    ctypes.POINTER(ctypes.c_double), # epsilon[]
+    ctypes.POINTER(ctypes.c_double), # sigma2[]
+    ctypes.c_bool # opmimized
+]
+ll.log_likelihood.restype = ctypes.c_double
 
 def format_float(number: float) -> str:
     return f"{number:.3f}"
@@ -63,7 +75,15 @@ class ARMAGARCH:
         self._dep_var_name = None #TODO: Add var name for pandas
         self.num_params = sum(order) + 2 # add 2 for mu and omega
     
-    def _get_loglikelihood(self, params, y_pad, y_mean, y_var, pad):
+    def _get_loglikelihood(
+        self,
+        params: tuple[int], 
+        y_pad: ndarray,
+        y_mean: float,
+        y_var: float,
+        pad: int,
+        optimized: bool
+    ) -> float:
         """Log-likelood computation for ARMA(n,m)-GARCH(p,q) model
 
         Args:
@@ -76,52 +96,26 @@ class ARMAGARCH:
         Returns:
             float64: negative log-likehood for the data
         """
-        n, m, p, q = self.order
+        y_pad_len = len(y_pad)
         
-        mu = params[0]
-        omega = params[1]
-        
-        phis = params[2 : 2+n]
-        thetas = params[2+n : 2+m+n]
-        alphas = params[2+m+n : 2+m+n+q]
-        betas = params[2+m+n+q : 2+m+n+q+p]
-        
-        if omega <= 0:
-            return 1e15
-        if np.any(alphas < 0) or np.any(betas < 0):
-            return 1e15
-        if np.sum(alphas) + np.sum(betas) >= 1:
-            return 1e15
-        
-        #TODO Change the initial values
-        epsilon = np.zeros(len(y_pad)) #Used to be len(y) + pad
-        epsilon[pad] = y_pad[pad] - y_mean
-        sigma2 = np.full(len(y) + pad, y_var)
-        loglikelihood = 0
+        epsilon = np.zeros(y_pad_len, dtype=np.float64)
 
-        for i in range(pad+1, len(y_pad)):
-            # epsilon[i] = y_pad[i] - mu - phis @ y_pad[i-1 : i-1-n : -1] - thetas @ epsilon[i-1 : i-1-m : -1]
-            # sigma2[i] = omega + alphas @ epsilon[i-1 : i-1-q : -1]**2 + betas @ sigma2[i-1 : i-1-p : -1]
-            
-            epsilon[i] = y_pad[i] - mu
-            for j in range(n):
-                epsilon[i] -= phis[j] * y_pad[i-j-1]
-            
-            for j in range(m):
-                epsilon[i] -= thetas[j] * epsilon[i-j-1] 
-            
-            sigma2[i] = omega
-            for j in range(q):
-                sigma2[i] += alphas[j] * epsilon[i-j-1]**2
-            
-            for j in range(p):
-                sigma2[i] += betas[j] * sigma2[i-j-1]
-                
-                
-        loglikelihood = -0.5 * np.sum(LOG_2PI + np.log(sigma2[pad+1:]) + epsilon[pad+1:]**2 / sigma2[pad+1:]) #TODO: Make sure it's pad + 1 and not pad
+        sigma2_pad = np.full(pad, y_var, dtype=np.float64)
+        sigma2 = np.concatenate((sigma2_pad, np.zeros(y_pad_len - pad)), dtype=np.float64)
+        
+        
+        loglikelihood = ll.log_likelihood(
+            y_pad.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            ctypes.c_int(len(y_pad)),
+            ctypes.c_int(pad),
+            np.asarray(params, dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            np.array(self.order, dtype=np.int32).ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            epsilon.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            sigma2.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            ctypes.c_bool(optimized)
+        )
 
-            
-        return -loglikelihood
+        return np.float64(-loglikelihood)
     
         
     def _get_cov(self, ll_fixed: Callable) -> ndarray:
@@ -148,7 +142,7 @@ class ARMAGARCH:
             return np.full((len(self.params_est), len(self.params_est)), np.nan)
         
 
-    def fit(self):
+    def fit(self, optimized: bool = True):
         """Fits an ARMA(n,m)-GARCH(p,q) model
 
         Returns:
@@ -182,7 +176,7 @@ class ARMAGARCH:
         
         pad = max(n, m, p, q)
         y_pad = np.concatenate([np.zeros(pad), self.y])
-        
+
         y_mean = np.mean(self.y)
         y_var = np.var(self.y)
         
@@ -195,21 +189,18 @@ class ARMAGARCH:
         np.full(p, 0.8)
         ])
         
-        persistence = sum(x0[i] for i in alpha_idx) + sum(x0[i] for i in beta_idx)
-        print(f"Persistence: {persistence}")
+        # persistence = sum(x0[i] for i in alpha_idx) + sum(x0[i] for i in beta_idx)
+
         
         res = scipy.optimize.minimize(
             fun=self._get_loglikelihood,
             x0=x0,
-            args=(y_pad, y_mean, y_var, pad),
+            args=(y_pad, y_mean, y_var, pad, optimized),
             bounds=bnds,
             constraints=constr,
             method='SLSQP'
         )
         
-        for i, (param, bound) in enumerate(zip(res.x, bnds)):
-            print(f"param[{i}]: value={param:.4f}, bound={bound}")
-    
         if not res.success:
             print("Optimization failed")
         
@@ -217,13 +208,14 @@ class ARMAGARCH:
         
         self.params_est = res.x
         self._log_likelihood = -res.fun
-        print(f"Log_likelihood: {self._log_likelihood}")
+
         cov = self._get_cov(lambda params: self._get_loglikelihood(
             params=params,
             y_pad=y_pad,
             y_mean=y_mean,
             y_var=y_var,
-            pad=pad
+            pad=pad,
+            optimized=False
         ))
         
         
@@ -360,21 +352,29 @@ m = 0
 p = 1
 q = 1
 
-true_params = [0.1, 0.1, 0.3, 0.1, 0.8]
+true_params = [0.1, 0.05, 0.3, 0.1, 0.8]
 
 y = simulate(1000, order=(n,m,p,q), params=true_params)
-# pad = max(n, m, p, q)
-# y_pad = np.concatenate([np.zeros(pad), y])
 
-#print(loglikelihood(x0, y_pad, n, m, p, q, y_mean=np.mean(y), y_var=np.var(y), pad=pad))
+import timeit
 
 model = ARMAGARCH(y, order=(n,m,p,q))
 
-res = model.fit()
+res = model.fit(optimized=True)
 print(res.summary())
+
+# time = timeit.timeit(lambda: model.fit(), number=1000)
+# print(f"M1. average: {time / 1000 * 1000:.4f} ms per call")
+
 
 # import arch
 
 # model = arch.univariate.ARX(y, lags=n)
 # model.volatility = arch.univariate.GARCH(p,0,q)
 # model.distribution = arch.univariate.Normal()
+
+# res = model.fit()
+# print(res.summary())
+
+# time = timeit.timeit(lambda: model.fit(), number=1000)
+# print(f"M2. average: {time / 1000 * 1000:.4f} ms per call")

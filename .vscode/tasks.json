@@ -1,0 +1,27 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Shared Library",
+            "type": "shell",
+            "command": "gcc",
+            "args": [
+                "-shared",
+                "-fPIC",
+                "-ffast-math",
+                "-O3",
+                "-march=x86-64-v3",
+                "-o",
+                "arimagarch/log_likelihood.so",
+                "arimagarch/log_likelihood.c",
+                "-lm",
+                "-lmvec"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"]
+        }
+    ]
+}
