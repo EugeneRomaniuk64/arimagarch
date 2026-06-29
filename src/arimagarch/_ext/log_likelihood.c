@@ -10,7 +10,7 @@ static inline double fast_log(double x) {
     // Extract exponent
     int exp = (int)((u.i >> 52) & 0x7FF) - 1023;
     
-    // Force exponent to 0, so mantissa is in [1, 2)
+    // Extract mantissa
     u.i = (u.i & 0x000FFFFFFFFFFFFFULL) | 0x3FF0000000000000ULL;
     double m = u.d;
     
@@ -22,7 +22,6 @@ static inline double fast_log(double x) {
     // Recombine: log(x) = log(2^exp * m) = exp*log(2) + log(m)
     return exp * 0.6931471805599453 + p;
 }
-
 
 #define DEFINE_LL(NAME, N, M, P, Q, LOGFN) \
 static double NAME( \
@@ -54,7 +53,7 @@ static double NAME( \
         /*ARCH terms*/ \
         for (int j = 0; j < Q; j++) \
             sigma2[i] += alphas[j] * epsilon[i - j - 1] * epsilon[i - j - 1]; \
-        if (sigma2[i] <= 0.0) return 1e15; \
+        if (sigma2[i] <= 0.0) return -1e15; \
         ll -= 0.5 * (LOG_2PI + LOGFN(sigma2[i]) + epsilon[i] * epsilon[i] / sigma2[i]); \
     } \
     return ll; \
@@ -113,10 +112,11 @@ static double ll_generic_slow(
         for (int j = 0; j < q; j++) 
             sigma2[i] += alphas[j] * epsilon[i - j - 1] * epsilon[i - j - 1]; 
 
-        if (sigma2[i] <= 0.0) return 1e15; 
+        if (sigma2[i] <= 0.0) return -1e15; 
 
         ll -= 0.5 * (LOG_2PI + log(sigma2[i]) + epsilon[i] * epsilon[i] / sigma2[i]); 
-    } 
+    }
+    
     return ll; 
 }
 
@@ -151,50 +151,64 @@ static double ll_generic_fast(
     double * restrict alphas, 
     double * restrict betas, 
     double * restrict epsilon, 
-    double * restrict sigma2 
+    double * restrict sigma2
 ) {
+    //printf("fast algo enter");
     double ll = 0.0; 
-    for (int i = pad; i < data_len; i++) { 
+    for (int i = pad; i < data_len; i++)
+    { 
         /*AR terms*/ 
         epsilon[i] = data[i] - mu; 
-        for (int j = 0; j < n; j++) 
+        for (int j = 0; j < n; j++)
+        {
             epsilon[i] -= phis[j] * data[i - j - 1]; 
+        }
 
         /*MA terms*/ 
-        for (int j = 0; j < m; j++) 
+        for (int j = 0; j < m; j++)
+        {
             epsilon[i] -= thetas[j] * epsilon[i - j - 1]; 
-        
+        }
+
         /*GARCH terms*/ 
         sigma2[i] = omega; 
-        for (int j = 0; j < p; j++) 
+        for (int j = 0; j < p; j++)
+        {
             sigma2[i] += betas[j] * sigma2[i - j - 1]; 
+        }
 
         /*ARCH terms*/ 
-        for (int j = 0; j < q; j++) 
+        for (int j = 0; j < q; j++)
+        {
             sigma2[i] += alphas[j] * epsilon[i - j - 1] * epsilon[i - j - 1]; 
+        }
 
-        if (sigma2[i] <= 0.0) return 1e15; 
-        
+        if (sigma2[i] <= 0.0) return -1e15;
+
         ll -= 0.5 * (LOG_2PI + fast_log(sigma2[i]) + epsilon[i] * epsilon[i] / sigma2[i]); 
-    } 
+    }
+
+    
     return ll; 
 }
 
 
-double log_likelihood (
+double log_likelihood(
     double * restrict data,
     int data_len,
     int pad,
-    double * restrict params,
     int * restrict order,
-    double * restrict epsilon,
-    double * restrict sigma2,
+    double * restrict params, // [n_params]
+    double * restrict epsilon, // [data_len]
+    double * restrict sigma2, // [data_len]
     bool optimized
 ) {
+    //printf("call");
     int n = order[0];
     int m = order[1];
     int p = order[2];
     int q = order[3];
+
 
     double mu = params[0];
     double omega = params[1];
@@ -283,6 +297,4 @@ double log_likelihood (
                 return ll_generic_slow(data, data_len, pad, n, m, p, q, mu, omega, phis, thetas, alphas, betas, epsilon, sigma2);
         }
     }
-    
-    
 }
